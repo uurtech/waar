@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.477.0",
+    "@aws-sdk/client-bedrock-agent-runtime": "^3.477.0",
     "@aws-sdk/client-cost-explorer": "^3.477.0",
     "@aws-sdk/client-iam": "^3.477.0",
     "@aws-sdk/client-ec2": "^3.477.0",

@@ -1,11 +1,8 @@
 import { Router } from 'express';
-import multer from 'multer';
 import path from 'path';
 import fs from 'fs/promises';
 import { v4 as uuidv4 } from 'uuid';
 import { fileURLToPath } from 'url';
-import archiver from 'archiver';
-import yauzl from 'yauzl';
 import { promisify } from 'util';
 import db from '../database/init.js';
 
@@ -14,39 +11,10 @@ const __dirname = path.dirname(__filename);
 
 const router = Router();
 
-// Configure multer for file uploads
-const storage = multer.diskStorage({
-  destination: async (req, file, cb) => {
-    const uploadDir = path.join(__dirname, '../../uploads');
-    await fs.mkdir(uploadDir, { recursive: true });
-    cb(null, uploadDir);
-  },
-  filename: (req, file, cb) => {
-    cb(null, `${uuidv4()}-${file.originalname}`);
-  }
-});
-
-const upload = multer({ 
-  storage,
-  limits: { fileSize: 100 * 1024 * 1024 }, // 100MB limit
-  fileFilter: (req, file, cb) => {
-    const allowedTypes = ['.zip', '.tar', '.gz', '.rar'];
-    const ext = path.extname(file.originalname).toLowerCase();
-    if (allowedTypes.includes(ext) || file.mimetype.includes('zip') || file.mimetype.includes('tar')) {
-      cb(null, true);
-    } else {
-      cb(new Error('Invalid file type. Please upload a zip, tar, or rar file.'));
-    }
-  }
-});
-
-// Upload and analyze codebase
-router.post('/upload', upload.single('codebase'), async (req, res) => {
+// Analyze mapped source code (no upload needed)
+router.post('/analyze', async (req, res) => {
   try {
-    if (!req.file) {
-      return res.status(400).json({ error: 'No file uploaded' });
-    }
-
+    const { sourcePath } = req.body;
     const sessionId = uuidv4();
     const bedrockService = req.app.locals.bedrockService();
     const awsService = req.app.locals.awsService();
@@ -57,12 +25,24 @@ router.post('/upload', upload.single('codebase'), async (req, res) => {
     // Create analysis session
     await db.run(
       'INSERT INTO analysis_sessions (id, codebase_path, analysis_status) VALUES (?, ?, ?)',
-      [sessionId, req.file.path, 'processing']
+      [sessionId, sourcePath || '/var/app/mapped_source', 'processing']
     );
 
-    // Extract and analyze codebase
-    const extractedPath = await extractCodebase(req.file.path, sessionId);
-    const codebaseStructure = await analyzeCodebaseStructure(extractedPath);
+    // Analyze the mapped source code
+    const mappedSourcePath = sourcePath || '/var/app/mapped_source';
+    
+    // Check if mapped source exists
+    try {
+      await fs.access(mappedSourcePath);
+    } catch (error) {
+      throw new Error(`Source code path not found: ${mappedSourcePath}. Please ensure you've mapped your source code volume correctly.`);
+    }
+
+    // Create temp folder for this analysis session
+    const tempAnalysisPath = await createTempAnalysisFolder(sessionId, mappedSourcePath);
+    
+    // Analyze codebase structure
+    const codebaseStructure = await analyzeCodebaseStructure(tempAnalysisPath);
 
     // Get AWS analysis data
     const [costAnalysis, iamAnalysis, computeAnalysis] = await Promise.all([
@@ -100,13 +80,23 @@ router.post('/upload', upload.single('codebase'), async (req, res) => {
       success: true,
       sessionId,
       analysis: analysisResult.analysis,
-      message: 'Codebase analyzed successfully'
+      message: 'Codebase analyzed successfully',
+      source: analysisResult.source || 'model',
+      tempPath: tempAnalysisPath
     });
 
   } catch (error) {
     req.app.locals.logger.error('Analysis error:', error);
     res.status(500).json({ error: error.message });
   }
+});
+
+// Legacy upload endpoint (kept for backward compatibility)
+router.post('/upload', async (req, res) => {
+  res.status(400).json({ 
+    error: 'File upload is deprecated. Please use the /analyze endpoint with mapped source code volumes.',
+    suggestion: 'Map your source code as a volume and use POST /api/analysis/analyze'
+  });
 });
 
 // Get analysis results
@@ -233,125 +223,236 @@ router.post('/:sessionId/follow-up', async (req, res) => {
   }
 });
 
-// Helper functions
-async function extractCodebase(filePath, sessionId) {
-  const extractDir = path.join(path.dirname(filePath), `extracted_${sessionId}`);
-  await fs.mkdir(extractDir, { recursive: true });
+// Clean up temp analysis folders
+router.delete('/:sessionId/cleanup', async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    const tempPath = path.join('/var/app/temp', `analysis_${sessionId}`);
+    
+    try {
+      await fs.rm(tempPath, { recursive: true, force: true });
+      req.app.locals.logger.info(`Cleaned up temp folder: ${tempPath}`);
+    } catch (error) {
+      req.app.locals.logger.warn(`Failed to cleanup temp folder: ${error.message}`);
+    }
 
-  return new Promise((resolve, reject) => {
-    yauzl.open(filePath, { lazyEntries: true }, (err, zipfile) => {
-      if (err) {
-        reject(err);
-        return;
-      }
-
-      zipfile.readEntry();
-      zipfile.on('entry', (entry) => {
-        if (/\/$/.test(entry.fileName)) {
-          // Directory entry
-          zipfile.readEntry();
-        } else {
-          // File entry
-          zipfile.openReadStream(entry, (err, readStream) => {
-            if (err) {
-              reject(err);
-              return;
-            }
-
-            const outputPath = path.join(extractDir, entry.fileName);
-            fs.mkdir(path.dirname(outputPath), { recursive: true }).then(() => {
-              const writeStream = require('fs').createWriteStream(outputPath);
-              readStream.pipe(writeStream);
-              readStream.on('end', () => {
-                zipfile.readEntry();
-              });
-            });
-          });
-        }
-      });
-
-      zipfile.on('end', () => {
-        resolve(extractDir);
-      });
-
-      zipfile.on('error', reject);
+    res.json({
+      success: true,
+      message: 'Cleanup completed'
     });
-  });
+
+  } catch (error) {
+    req.app.locals.logger.error('Cleanup error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Helper functions
+async function createTempAnalysisFolder(sessionId, sourcePath) {
+  const tempDir = path.join('/var/app/temp', `analysis_${sessionId}`);
+  
+  try {
+    // Create temp directory
+    await fs.mkdir(tempDir, { recursive: true });
+    
+    // Copy source files to temp directory (excluding node_modules and other unwanted files)
+    await copySourceFiles(sourcePath, tempDir);
+    
+    return tempDir;
+  } catch (error) {
+    throw new Error(`Failed to create temp analysis folder: ${error.message}`);
+  }
 }
 
-async function analyzeCodebaseStructure(extractedPath) {
+async function copySourceFiles(sourcePath, targetPath, currentPath = '') {
+  const items = await fs.readdir(path.join(sourcePath, currentPath), { withFileTypes: true });
+  
+  const excludePatterns = [
+    'node_modules',
+    '.git',
+    '.svn',
+    '.hg',
+    'dist',
+    'build',
+    'coverage',
+    '.nyc_output',
+    'logs',
+    'tmp',
+    'temp',
+    '.cache',
+    '.vscode',
+    '.idea',
+    '.DS_Store',
+    'Thumbs.db'
+  ];
+
+  for (const item of items) {
+    const itemName = item.name;
+    const itemPath = path.join(currentPath, itemName);
+    const sourceFull = path.join(sourcePath, itemPath);
+    const targetFull = path.join(targetPath, itemPath);
+
+    // Skip excluded patterns
+    if (excludePatterns.some(pattern => itemName.includes(pattern))) {
+      continue;
+    }
+
+    // Skip files larger than 10MB
+    if (item.isFile()) {
+      try {
+        const stats = await fs.stat(sourceFull);
+        if (stats.size > 10 * 1024 * 1024) {
+          continue;
+        }
+      } catch (error) {
+        continue;
+      }
+    }
+
+    if (item.isDirectory()) {
+      await fs.mkdir(targetFull, { recursive: true });
+      await copySourceFiles(sourcePath, targetPath, itemPath);
+    } else {
+      try {
+        await fs.copyFile(sourceFull, targetFull);
+      } catch (error) {
+        // Skip files that can't be copied
+        continue;
+      }
+    }
+  }
+}
+
+async function analyzeCodebaseStructure(analysisPath) {
   const structure = {
     files: [],
     directories: [],
     technologies: new Set(),
     totalFiles: 0,
-    totalSize: 0
+    totalSize: 0,
+    packageFiles: [],
+    configFiles: [],
+    dockerFiles: [],
+    infraFiles: []
   };
 
   async function scanDirectory(dirPath, relativePath = '') {
-    const items = await fs.readdir(dirPath, { withFileTypes: true });
+    try {
+      const items = await fs.readdir(dirPath, { withFileTypes: true });
 
-    for (const item of items) {
-      const fullPath = path.join(dirPath, item.name);
-      const itemRelativePath = path.join(relativePath, item.name);
+      for (const item of items) {
+        const fullPath = path.join(dirPath, item.name);
+        const itemRelativePath = path.join(relativePath, item.name);
 
-      if (item.isDirectory()) {
-        structure.directories.push(itemRelativePath);
-        await scanDirectory(fullPath, itemRelativePath);
-      } else {
-        const stats = await fs.stat(fullPath);
-        const ext = path.extname(item.name).toLowerCase();
-        
-        structure.files.push({
-          path: itemRelativePath,
-          size: stats.size,
-          extension: ext,
-          modified: stats.mtime
-        });
+        if (item.isDirectory()) {
+          structure.directories.push(itemRelativePath);
+          await scanDirectory(fullPath, itemRelativePath);
+        } else {
+          try {
+            const stats = await fs.stat(fullPath);
+            const ext = path.extname(item.name).toLowerCase();
+            
+            structure.files.push({
+              path: itemRelativePath,
+              size: stats.size,
+              extension: ext,
+              modified: stats.mtime
+            });
 
-        structure.totalFiles++;
-        structure.totalSize += stats.size;
+            structure.totalFiles++;
+            structure.totalSize += stats.size;
 
-        // Detect technologies
-        if (['.js', '.jsx', '.ts', '.tsx'].includes(ext)) {
-          structure.technologies.add('JavaScript/TypeScript');
-        } else if (['.py'].includes(ext)) {
-          structure.technologies.add('Python');
-        } else if (['.java'].includes(ext)) {
-          structure.technologies.add('Java');
-        } else if (['.go'].includes(ext)) {
-          structure.technologies.add('Go');
-        } else if (['.rs'].includes(ext)) {
-          structure.technologies.add('Rust');
-        } else if (['.php'].includes(ext)) {
-          structure.technologies.add('PHP');
-        } else if (['.rb'].includes(ext)) {
-          structure.technologies.add('Ruby');
-        } else if (['.cs'].includes(ext)) {
-          structure.technologies.add('C#');
-        } else if (['.cpp', '.cc', '.cxx'].includes(ext)) {
-          structure.technologies.add('C++');
-        } else if (['.dockerfile', 'dockerfile'].includes(item.name.toLowerCase())) {
-          structure.technologies.add('Docker');
-        } else if (['package.json', 'yarn.lock', 'package-lock.json'].includes(item.name.toLowerCase())) {
-          structure.technologies.add('Node.js');
-        } else if (['requirements.txt', 'setup.py', 'pipfile'].includes(item.name.toLowerCase())) {
-          structure.technologies.add('Python');
-        } else if (['pom.xml', 'build.gradle'].includes(item.name.toLowerCase())) {
-          structure.technologies.add('Java');
-        } else if (['terraform', '.tf'].includes(ext)) {
-          structure.technologies.add('Terraform');
-        } else if (['cloudformation', '.yaml', '.yml'].includes(ext)) {
-          structure.technologies.add('CloudFormation');
+            // Analyze file types and technologies
+            analyzeFileType(item.name, ext, itemRelativePath, structure);
+
+          } catch (error) {
+            // Skip files that can't be accessed
+            continue;
+          }
         }
       }
+    } catch (error) {
+      // Skip directories that can't be accessed
+      return;
     }
   }
 
-  await scanDirectory(extractedPath);
+  await scanDirectory(analysisPath);
   structure.technologies = Array.from(structure.technologies);
   
   return structure;
+}
+
+function analyzeFileType(fileName, ext, filePath, structure) {
+  const lowerFileName = fileName.toLowerCase();
+  
+  // Package files
+  if (['package.json', 'yarn.lock', 'package-lock.json', 'pom.xml', 'build.gradle', 'requirements.txt', 'setup.py', 'pipfile', 'composer.json', 'gemfile'].includes(lowerFileName)) {
+    structure.packageFiles.push(filePath);
+  }
+
+  // Config files
+  if (lowerFileName.includes('config') || ['.env', '.yaml', '.yml', '.toml', '.ini', '.conf'].includes(ext) || ['tsconfig.json', 'webpack.config.js', '.eslintrc', '.prettierrc'].includes(lowerFileName)) {
+    structure.configFiles.push(filePath);
+  }
+
+  // Docker files
+  if (lowerFileName.includes('docker') || ['dockerfile', '.dockerignore', 'docker-compose.yml', 'docker-compose.yaml'].includes(lowerFileName)) {
+    structure.dockerFiles.push(filePath);
+  }
+
+  // Infrastructure files
+  if (['.tf', '.tfvars'].includes(ext) || lowerFileName.includes('terraform') || lowerFileName.includes('cloudformation') || lowerFileName.includes('serverless')) {
+    structure.infraFiles.push(filePath);
+  }
+
+  // Detect technologies
+  if (['.js', '.jsx', '.ts', '.tsx'].includes(ext)) {
+    structure.technologies.add('JavaScript/TypeScript');
+  } else if (['.py'].includes(ext)) {
+    structure.technologies.add('Python');
+  } else if (['.java'].includes(ext)) {
+    structure.technologies.add('Java');
+  } else if (['.go'].includes(ext)) {
+    structure.technologies.add('Go');
+  } else if (['.rs'].includes(ext)) {
+    structure.technologies.add('Rust');
+  } else if (['.php'].includes(ext)) {
+    structure.technologies.add('PHP');
+  } else if (['.rb'].includes(ext)) {
+    structure.technologies.add('Ruby');
+  } else if (['.cs'].includes(ext)) {
+    structure.technologies.add('C#');
+  } else if (['.cpp', '.cc', '.cxx', '.c'].includes(ext)) {
+    structure.technologies.add('C/C++');
+  } else if (['.swift'].includes(ext)) {
+    structure.technologies.add('Swift');
+  } else if (['.kt', '.kts'].includes(ext)) {
+    structure.technologies.add('Kotlin');
+  } else if (['.scala'].includes(ext)) {
+    structure.technologies.add('Scala');
+  } else if (['.clj', '.cljs'].includes(ext)) {
+    structure.technologies.add('Clojure');
+  }
+
+  // Framework detection
+  if (lowerFileName === 'package.json') {
+    structure.technologies.add('Node.js');
+  } else if (['requirements.txt', 'setup.py', 'pipfile'].includes(lowerFileName)) {
+    structure.technologies.add('Python');
+  } else if (['pom.xml', 'build.gradle'].includes(lowerFileName)) {
+    structure.technologies.add('Java');
+  } else if (lowerFileName.includes('docker')) {
+    structure.technologies.add('Docker');
+  } else if (['.tf', '.tfvars'].includes(ext)) {
+    structure.technologies.add('Terraform');
+  } else if (lowerFileName.includes('cloudformation') || (ext === '.yaml' && filePath.includes('cloudformation'))) {
+    structure.technologies.add('CloudFormation');
+  } else if (lowerFileName.includes('serverless')) {
+    structure.technologies.add('Serverless Framework');
+  } else if (lowerFileName.includes('kubernetes') || lowerFileName.includes('k8s')) {
+    structure.technologies.add('Kubernetes');
+  }
 }
 
 export { router as analysisRoutes }; 
