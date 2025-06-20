@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  well-architected-reviewer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: well-architected-reviewer
+    ports:
+      - "8080:8080"
+
+    volumes:
+      # Persistent data storage for SQLite database and logs
+      - ./data:/var/app/data
+      - ./logs:/var/app/logs
+      - /var/app/node_modules 
+      
+      # Optional: Mount source code for development (uncomment for dev mode)
+      # - ./app:/var/app

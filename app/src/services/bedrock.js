@@ -178,6 +178,13 @@ export class BedrockService {
   buildAnalysisPrompt(codebaseStructure, additionalContext) {
     const { awsAnalysis, costAnalysis, iamAnalysis, computeAnalysis } = additionalContext;
 
+    // Check if this is primarily an IaC analysis
+    const hasIaCTemplates = codebaseStructure.iacTemplates && codebaseStructure.iacTemplates.length > 0;
+
+    if (hasIaCTemplates) {
+      return this.buildIaCAnalysisPrompt(codebaseStructure, additionalContext);
+    }
+
     return `You are an expert AWS Well-Architected Framework reviewer analyzing a codebase for architectural best practices. Provide a comprehensive analysis based on the six pillars of the Well-Architected Framework.
 
 CODEBASE STRUCTURE:
@@ -258,6 +265,213 @@ Format your response as JSON with the following structure:
       "question": "question text",
       "context": "why this question is important",
       "relatedQuestions": ["related question keys"]
+    }
+  ]
+}`;
+  }
+
+  buildIaCAnalysisPrompt(codebaseStructure, additionalContext) {
+    const { costAnalysis, iamAnalysis, computeAnalysis } = additionalContext;
+    const iacTemplates = codebaseStructure.iacTemplates || [];
+
+    // Build template summaries for the prompt (limit content size)
+    const templateSummaries = iacTemplates.map(template => ({
+      path: template.path,
+      type: template.type,
+      fileName: template.fileName,
+      size: template.size,
+      // Truncate content if too large, but include key sections
+      content: template.content.length > 8000 ? 
+        template.content.substring(0, 8000) + '\n... [Content truncated]' : 
+        template.content
+    }));
+
+    return `You are an expert AWS Well-Architected Framework reviewer specializing in Infrastructure as Code (IaC) analysis. 
+
+You are analyzing ${iacTemplates.length} Infrastructure as Code template(s) for AWS Well-Architected Framework compliance.
+
+INFRASTRUCTURE TEMPLATES:
+${JSON.stringify(templateSummaries, null, 2)}
+
+${costAnalysis ? `\nCURRENT AWS COST ANALYSIS:\n${JSON.stringify(costAnalysis, null, 2)}` : ''}
+
+${iamAnalysis ? `\nCURRENT IAM SECURITY ANALYSIS:\n${JSON.stringify(iamAnalysis, null, 2)}` : ''}
+
+${computeAnalysis ? `\nCURRENT COMPUTE RESOURCES:\n${JSON.stringify(computeAnalysis, null, 2)}` : ''}
+
+Analyze these Infrastructure as Code templates against the AWS Well-Architected Framework's six pillars:
+
+**1. OPERATIONAL EXCELLENCE**
+- Automation and deployment practices
+- Infrastructure monitoring and logging
+- Change management and rollback capabilities
+- Documentation and operational procedures
+- Performance monitoring setup
+
+**2. SECURITY**
+- IAM roles, policies, and permissions
+- Encryption at rest and in transit
+- Network security (VPCs, Security Groups, NACLs)
+- Secrets management
+- Access logging and auditing
+- Compliance with security best practices
+
+**3. RELIABILITY**
+- Multi-AZ and cross-region deployments
+- Auto-scaling configurations
+- Backup and disaster recovery
+- Health checks and monitoring
+- Fault tolerance and redundancy
+- Error handling and retries
+
+**4. PERFORMANCE EFFICIENCY**
+- Resource sizing and instance types
+- Storage performance configurations
+- Network optimization
+- Caching strategies
+- Database performance settings
+- Compute resource allocation
+
+**5. COST OPTIMIZATION**
+- Resource rightsizing
+- Reserved instances and savings plans usage
+- Storage class optimization
+- Lifecycle policies
+- Unused resource identification
+- Cost monitoring and budgeting
+
+**6. SUSTAINABILITY**
+- Resource efficiency
+- Carbon footprint considerations
+- Serverless and managed service usage
+- Resource lifecycle management
+- Green computing practices
+
+For each template, identify:
+- Resource types and configurations
+- Security misconfigurations
+- Cost optimization opportunities
+- Performance bottlenecks
+- Reliability issues
+- Operational challenges
+
+Provide specific, actionable recommendations with:
+- Exact resource names/paths where issues exist
+- Code snippets showing current vs. recommended configurations
+- Priority levels (Critical/High/Medium/Low)
+- Estimated impact on cost, security, and performance
+
+Please provide your analysis in the following JSON format:
+
+{
+  "overallAssessment": "Overall assessment of the infrastructure templates",
+  "templatesAnalyzed": ${iacTemplates.length},
+  "templateTypes": [${iacTemplates.map(t => `"${t.type}"`).join(', ')}],
+  "pillars": {
+    "operationalExcellence": {
+      "status": "Good|Needs Improvement|Critical",
+      "score": 1-5,
+      "findings": ["specific finding with resource name"],
+      "recommendations": [
+        {
+          "title": "recommendation title",
+          "description": "actionable recommendation with code example",
+          "priority": "Critical|High|Medium|Low",
+          "effort": "Low|Medium|High",
+          "resourcePath": "path/to/template.yaml",
+          "resourceName": "specific resource name"
+        }
+      ]
+    },
+    "security": {
+      "status": "Good|Needs Improvement|Critical",
+      "score": 1-5,
+      "findings": ["specific security finding with resource name"],
+      "recommendations": [
+        {
+          "title": "security recommendation title",
+          "description": "security recommendation with code example",
+          "priority": "Critical|High|Medium|Low",
+          "effort": "Low|Medium|High",
+          "resourcePath": "path/to/template.yaml",
+          "resourceName": "specific resource name",
+          "securityImpact": "High|Medium|Low"
+        }
+      ]
+    },
+    "reliability": {
+      "status": "Good|Needs Improvement|Critical",
+      "score": 1-5,
+      "findings": ["reliability finding with resource name"],
+      "recommendations": [
+        {
+          "title": "reliability recommendation title",
+          "description": "reliability recommendation",
+          "priority": "Critical|High|Medium|Low",
+          "effort": "Low|Medium|High",
+          "resourcePath": "path/to/template.yaml"
+        }
+      ]
+    },
+    "performanceEfficiency": {
+      "status": "Good|Needs Improvement|Critical", 
+      "score": 1-5,
+      "findings": ["performance finding with resource name"],
+      "recommendations": [
+        {
+          "title": "performance recommendation title",
+          "description": "performance optimization recommendation",
+          "priority": "Critical|High|Medium|Low",
+          "effort": "Low|Medium|High",
+          "resourcePath": "path/to/template.yaml"
+        }
+      ]
+    },
+    "costOptimization": {
+      "status": "Good|Needs Improvement|Critical",
+      "score": 1-5,
+      "findings": ["cost finding with resource name"],
+      "recommendations": [
+        {
+          "title": "cost optimization title",
+          "description": "cost optimization recommendation",
+          "priority": "Critical|High|Medium|Low",
+          "effort": "Low|Medium|High",
+          "estimatedSavings": "potential monthly savings estimate",
+          "resourcePath": "path/to/template.yaml"
+        }
+      ]
+    },
+    "sustainability": {
+      "status": "Good|Needs Improvement|Critical",
+      "score": 1-5,
+      "findings": ["sustainability finding"],
+      "recommendations": [
+        {
+          "title": "sustainability recommendation title",
+          "description": "sustainability recommendation",
+          "priority": "Medium|Low",
+          "effort": "Low|Medium|High"
+        }
+      ]
+    }
+  },
+  "overallScore": 1-5,
+  "criticalIssues": ["cross-pillar critical issues with resource names"],
+  "quickWins": ["easy-to-implement improvements with specific resources"],
+  "resourceInventory": {
+    "compute": ["EC2, Lambda, ECS, etc. with counts"],
+    "storage": ["S3, EBS, EFS, etc. with counts"],
+    "database": ["RDS, DynamoDB, etc. with counts"],
+    "networking": ["VPC, ALB, CloudFront, etc. with counts"],
+    "security": ["IAM, KMS, Secrets Manager, etc. with counts"]
+  },
+  "followUpQuestions": [
+    {
+      "pillar": "pillar name",
+      "question": "specific question about the infrastructure",
+      "context": "why this question is important for this infrastructure",
+      "relatedResources": ["resource names this question relates to"]
     }
   ]
 }`;
@@ -552,6 +766,316 @@ Format as JSON:
         success: false, 
         error: error.message 
       };
+    }
+  }
+
+  async analyzeText(prompt) {
+    try {
+      // First try with agent if available
+      if (this.config.agentId && this.agentClient) {
+        try {
+          const command = new InvokeAgentCommand({
+            agentId: this.config.agentId,
+            agentAliasId: this.config.agentAliasId,
+            sessionId: `text-analysis-${Date.now()}`,
+            inputText: prompt
+          });
+
+          const response = await this.agentClient.send(command);
+          let fullResponse = '';
+          
+          for await (const event of response.completion) {
+            if (event.chunk?.bytes) {
+              const chunk = JSON.parse(Buffer.from(event.chunk.bytes).toString());
+              if (chunk.type === 'chunk') {
+                fullResponse += chunk.bytes ? Buffer.from(chunk.bytes, 'base64').toString() : '';
+              }
+            }
+          }
+
+          return {
+            success: true,
+            analysis: fullResponse,
+            source: 'agent'
+          };
+        } catch (agentError) {
+          console.warn('Agent text analysis failed, falling back to model:', agentError.message);
+          
+          if (this.config.agentOnly) {
+            throw new Error(`Agent text analysis failed: ${agentError.message}`);
+          }
+        }
+      }
+
+      // Fallback to direct model if agent fails or not available
+      if (this.config.agentOnly) {
+        throw new Error('Direct model invocation is disabled in agent-only mode');
+      }
+
+      const command = new InvokeModelCommand({
+        modelId: this.config.modelId,
+        contentType: 'application/json',
+        accept: 'application/json',
+        body: JSON.stringify({
+          anthropic_version: 'bedrock-2023-05-31',
+          max_tokens: 2000,
+          messages: [
+            {
+              role: 'user',
+              content: prompt
+            }
+          ],
+          temperature: 0.1
+        })
+      });
+
+      const response = await this.client.send(command);
+      const responseBody = JSON.parse(Buffer.from(response.body).toString());
+      
+      return {
+        success: true,
+        analysis: responseBody.content[0].text,
+        source: 'model'
+      };
+
+    } catch (error) {
+      console.error('Text analysis error:', error);
+      throw error;
+    }
+  }
+
+  async analyzeAWSDataForWellArchitected(awsData) {
+    try {
+      console.log('🤖 Analyzing AWS data with Bedrock Agent for Well-Architected questions');
+
+      const prompt = `You are an expert AWS Well-Architected Framework reviewer. Analyze the following comprehensive AWS data and automatically answer as many Well-Architected Framework questions as possible based on the available data.
+
+AWS ANALYSIS DATA:
+${JSON.stringify(awsData, null, 2)}
+
+Your task:
+1. Review the AWS data (Trusted Advisor, Cost Explorer, IAM, EC2, CloudWatch, Config)
+2. Automatically answer Well-Architected Framework questions where you have sufficient data
+3. For each auto-answered question, provide the answer and confidence score (0.0-1.0)
+4. Identify questions that require user input because the data is insufficient
+
+Please respond in the following JSON format:
+{
+  "autoAnswers": [
+    {
+      "questionKey": "SEC01",
+      "pillar": "Security", 
+      "answer": "Based on the IAM analysis, MFA is enabled for 80% of users...",
+      "confidence": 0.85,
+      "dataSource": "IAM Analysis - Credential Report"
+    }
+  ],
+  "autoAnsweredQuestions": 15,
+  "questionsNeedingUserInput": [
+    {
+      "questionKey": "OPS01",
+      "reason": "Requires organizational context not available in AWS data"
+    }
+  ],
+  "summary": "Automatically answered 15 questions based on AWS data analysis. Remaining questions require organizational and procedural context."
+}`;
+
+      const response = await this.analyzeText(prompt);
+      
+      if (response.success) {
+        try {
+          const jsonMatch = response.analysis.match(/\{[\s\S]*\}/);
+          if (jsonMatch) {
+            return JSON.parse(jsonMatch[0]);
+          }
+        } catch (error) {
+          console.error('Error parsing agent response:', error);
+        }
+      }
+
+      // Fallback response
+      return {
+        autoAnswers: [],
+        autoAnsweredQuestions: 0,
+        questionsNeedingUserInput: [],
+        summary: 'Unable to automatically answer questions. Manual review required.'
+      };
+
+    } catch (error) {
+      console.error('Error analyzing AWS data for Well-Architected questions:', error);
+      throw error;
+    }
+  }
+
+  async analyzeUserAnswer(userAnswer, questionKey, sessionId) {
+    try {
+      console.log(`🤖 Analyzing user answer for question ${questionKey}`);
+
+      const prompt = `You are an expert AWS Well-Architected Framework reviewer. A user has provided an answer to a Well-Architected question. Analyze this answer and determine if it can also answer other related questions.
+
+USER ANSWER: "${userAnswer}"
+QUESTION KEY: ${questionKey}
+
+Your task:
+1. Analyze the user's answer for completeness and relevance
+2. Identify other Well-Architected questions that this answer might also address
+3. Generate derived answers for those related questions
+4. Provide confidence scores for each derived answer
+
+Please respond in JSON format:
+{
+  "primaryAnswer": {
+    "questionKey": "${questionKey}",
+    "analysis": "Analysis of the primary answer quality and completeness",
+    "confidence": 0.9
+  },
+  "additionalAnswers": [
+    {
+      "questionKey": "REL02",
+      "answer": "Derived answer based on user's response...",
+      "confidence": 0.75,
+      "reasoning": "User mentioned network topology which relates to this reliability question"
+    }
+  ],
+  "suggestions": [
+    "Consider elaborating on backup strategies",
+    "Mention specific monitoring tools used"
+  ]
+}`;
+
+      const response = await this.analyzeText(prompt);
+      
+      if (response.success) {
+        try {
+          const jsonMatch = response.analysis.match(/\{[\s\S]*\}/);
+          if (jsonMatch) {
+            return JSON.parse(jsonMatch[0]);
+          }
+        } catch (error) {
+          console.error('Error parsing user answer analysis:', error);
+        }
+      }
+
+      // Fallback response
+      return {
+        primaryAnswer: {
+          questionKey,
+          analysis: 'Answer recorded',
+          confidence: 0.8
+        },
+        additionalAnswers: [],
+        suggestions: []
+      };
+
+    } catch (error) {
+      console.error('Error analyzing user answer:', error);
+      throw error;
+    }
+  }
+
+  async generateWellArchitectedReport(answers, awsData) {
+    try {
+      console.log('📊 Generating comprehensive Well-Architected Framework report');
+
+      const prompt = `You are an expert AWS Well-Architected Framework reviewer. Generate a comprehensive Well-Architected Framework report based on the provided answers and AWS analysis data.
+
+ANSWERS TO WELL-ARCHITECTED QUESTIONS:
+${JSON.stringify(answers, null, 2)}
+
+AWS ANALYSIS DATA:
+${JSON.stringify(awsData, null, 2)}
+
+Generate a comprehensive report with:
+1. Overall Well-Architected maturity score (1-5)
+2. Detailed analysis for each of the 6 pillars
+3. Specific recommendations with priority levels
+4. Action plan with timelines
+5. Risk assessment
+6. Cost impact analysis
+
+Please respond in JSON format:
+{
+  "overallScore": 3.8,
+  "maturityLevel": "Intermediate",
+  "pillars": {
+    "operationalExcellence": {
+      "score": 4.2,
+      "status": "Good",
+      "strengths": ["Automated deployments", "Comprehensive monitoring"],
+      "weaknesses": ["Limited runbook documentation"],
+      "recommendations": [
+        {
+          "title": "Improve Runbook Documentation",
+          "description": "Create comprehensive operational runbooks",
+          "priority": "Medium",
+          "effort": "2-4 weeks",
+          "impact": "High"
+        }
+      ]
+    },
+    "security": {
+      "score": 3.5,
+      "status": "Needs Improvement",
+      "strengths": ["MFA enabled", "IAM roles implemented"],
+      "weaknesses": ["Some unencrypted resources", "Missing security monitoring"],
+      "recommendations": [
+        {
+          "title": "Enable Encryption at Rest",
+          "description": "Encrypt all storage resources",
+          "priority": "High",
+          "effort": "1-2 weeks",
+          "impact": "High"
+        }
+      ]
+    }
+  },
+  "criticalIssues": [
+    "Unencrypted EBS volumes identified",
+    "Missing backup strategy for critical databases"
+  ],
+  "quickWins": [
+    "Enable MFA for remaining users",
+    "Set up billing alerts"
+  ],
+  "actionPlan": {
+    "immediate": ["Enable encryption", "Set up monitoring"],
+    "shortTerm": ["Implement backup strategy", "Update documentation"],
+    "longTerm": ["Multi-region deployment", "Advanced security controls"]
+  },
+  "estimatedCostImpact": {
+    "savings": "$2,400/month",
+    "investments": "$1,200/month",
+    "netBenefit": "$1,200/month"
+  }
+}`;
+
+      const response = await this.analyzeText(prompt);
+      
+      if (response.success) {
+        try {
+          const jsonMatch = response.analysis.match(/\{[\s\S]*\}/);
+          if (jsonMatch) {
+            return JSON.parse(jsonMatch[0]);
+          }
+        } catch (error) {
+          console.error('Error parsing Well-Architected report:', error);
+        }
+      }
+
+      // Fallback response
+      return {
+        overallScore: 3.0,
+        maturityLevel: "Developing",
+        pillars: {},
+        criticalIssues: [],
+        quickWins: [],
+        actionPlan: { immediate: [], shortTerm: [], longTerm: [] },
+        estimatedCostImpact: { savings: "TBD", investments: "TBD", netBenefit: "TBD" }
+      };
+
+    } catch (error) {
+      console.error('Error generating Well-Architected report:', error);
+      throw error;
     }
   }
 

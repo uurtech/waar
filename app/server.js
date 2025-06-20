@@ -17,7 +17,6 @@ import { AWSService } from './src/services/aws.js';
 import { BedrockService } from './src/services/bedrock.js';
 
 // Import routes
-import { indexRoutes } from './src/routes/index.js';
 import { analysisRoutes } from './src/routes/analysis.js';
 import { questionsRoutes } from './src/routes/questions.js';
 import { mcpRoutes } from './src/routes/mcp.js';
@@ -35,6 +34,7 @@ class WellArchitectedServer {
     this.logger = null;
     this.awsService = null;
     this.bedrockService = null;
+    this.database = null;
   }
 
   async initialize() {
@@ -47,6 +47,9 @@ class WellArchitectedServer {
 
       // Initialize logger
       this.initializeLogger();
+
+      // Initialize database
+      await this.initializeDatabase();
 
       // Initialize services
       await this.initializeServices();
@@ -99,6 +102,21 @@ class WellArchitectedServer {
     console.log(`📝 Logger initialized with level: ${appConfig.logLevel}`);
   }
 
+  async initializeDatabase() {
+    try {
+      console.log('📂 Initializing database...');
+      this.database = await initializeDatabase();
+      
+      // Make database available to routes
+      this.app.locals.db = this.database;
+      
+      console.log('✅ Database initialized successfully');
+    } catch (error) {
+      console.error('❌ Database initialization failed:', error);
+      throw error;
+    }
+  }
+
   async initializeServices() {
     try {
       const awsConfig = this.config.aws;
@@ -148,7 +166,8 @@ class WellArchitectedServer {
           defaultSrc: ["'self'"],
           styleSrc: ["'self'", "'unsafe-inline'", "https://cdnjs.cloudflare.com", "https://fonts.googleapis.com"],
           fontSrc: ["'self'", "https://fonts.gstatic.com", "https://cdnjs.cloudflare.com"],
-          scriptSrc: ["'self'", "'unsafe-inline'"],
+          scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'"],
+          scriptSrcAttr: ["'unsafe-inline'"],
           imgSrc: ["'self'", "data:", "https:"],
           connectSrc: ["'self'"]
         }
@@ -179,12 +198,8 @@ class WellArchitectedServer {
   }
 
   setupRoutes() {
-    // Mount routes
-    this.app.use('/', indexRoutes);
-    this.app.use('/api/analysis', analysisRoutes);
-    this.app.use('/api/questions', questionsRoutes);
-    this.app.use('/api/mcp', mcpRoutes);
-    this.app.use('/api/health', healthRoutes);
+    // Use the setupRoutes function from routes/index.js
+    setupRoutes(this.app);
 
     // 404 handler
     this.app.use('*', (req, res) => {

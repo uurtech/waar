@@ -11,8 +11,8 @@ const __dirname = path.dirname(__filename);
 
 const router = Router();
 
-// Analyze mapped source code (no upload needed)
-router.post('/analyze', async (req, res) => {
+// Analyze Infrastructure as Code templates
+router.post('/analyze-iac', async (req, res) => {
   try {
     const { sourcePath } = req.body;
     const sessionId = uuidv4();
@@ -20,39 +20,49 @@ router.post('/analyze', async (req, res) => {
     const awsService = req.app.locals.awsService();
     const logger = req.app.locals.logger;
 
-    logger.info(`Starting analysis for session ${sessionId}`);
+    logger.info(`Starting IaC analysis for session ${sessionId}`);
 
     // Create analysis session
     await db.run(
       'INSERT INTO analysis_sessions (id, codebase_path, analysis_status) VALUES (?, ?, ?)',
-      [sessionId, sourcePath || '/var/app/mapped_source', 'processing']
+      [sessionId, sourcePath || '/var/app/iac_templates', 'processing']
     );
 
-    // Analyze the mapped source code
-    const mappedSourcePath = sourcePath || '/var/app/mapped_source';
+    // Step 1: Initialize IaC analysis
+    await updateProgress(sessionId, 1, 'Initializing Infrastructure as Code analysis...', 10);
+
+    // Analyze the IaC templates
+    const iacPath = sourcePath || '/var/app/iac_templates';
     
-    // Check if mapped source exists
+    // Check if IaC templates exist
     try {
-      await fs.access(mappedSourcePath);
+      await fs.access(iacPath);
     } catch (error) {
-      throw new Error(`Source code path not found: ${mappedSourcePath}. Please ensure you've mapped your source code volume correctly.`);
+      throw new Error(`IaC templates path not found: ${iacPath}. Please ensure you've mapped your CloudFormation/Terraform templates volume correctly.`);
     }
 
     // Create temp folder for this analysis session
-    const tempAnalysisPath = await createTempAnalysisFolder(sessionId, mappedSourcePath);
+    const tempAnalysisPath = await createTempAnalysisFolder(sessionId, iacPath);
     
-    // Analyze codebase structure
-    const codebaseStructure = await analyzeCodebaseStructure(tempAnalysisPath);
+    // Analyze IaC structure (this will now capture template contents)
+    const iacStructure = await analyzeCodebaseStructure(tempAnalysisPath);
 
-    // Get AWS analysis data
+    // Validate that we found IaC templates
+    if (!iacStructure.iacTemplates || iacStructure.iacTemplates.length === 0) {
+      throw new Error('No Infrastructure as Code templates found. Please ensure your volume contains CloudFormation (.yaml, .yml, .json) or Terraform (.tf) files.');
+    }
+
+    logger.info(`Found ${iacStructure.iacTemplates.length} IaC templates: ${iacStructure.iacTemplates.map(t => `${t.fileName} (${t.type})`).join(', ')}`);
+
+    // Get AWS analysis data (current state for comparison)
     const [costAnalysis, iamAnalysis, computeAnalysis] = await Promise.all([
       awsService.analyzeCosts(),
       awsService.analyzeIAM(),
       awsService.analyzeCompute()
     ]);
 
-    // Analyze with Bedrock
-    const analysisResult = await bedrockService.analyzeCodebase(codebaseStructure, {
+    // Analyze with Bedrock Agent (will use IaC-specific prompts)
+    const analysisResult = await bedrockService.analyzeCodebase(iacStructure, {
       costAnalysis: costAnalysis.data,
       iamAnalysis: iamAnalysis.data,
       computeAnalysis: computeAnalysis.data
@@ -73,6 +83,104 @@ router.post('/analyze', async (req, res) => {
       db.run('INSERT INTO mcp_analysis (session_id, analysis_type, results) VALUES (?, ?, ?)', 
         [sessionId, 'compute', JSON.stringify(computeAnalysis)])
     ]);
+
+    logger.info(`IaC analysis completed for session ${sessionId}`);
+
+    res.json({
+      success: true,
+      sessionId,
+      analysis: analysisResult.analysis,
+      message: `Successfully analyzed ${iacStructure.iacTemplates.length} Infrastructure as Code templates`,
+      source: analysisResult.source || 'agent',
+      templatesAnalyzed: iacStructure.iacTemplates.map(t => ({
+        path: t.path,
+        type: t.type,
+        fileName: t.fileName,
+        size: t.size
+      })),
+      tempPath: tempAnalysisPath
+    });
+
+  } catch (error) {
+    req.app.locals.logger.error('IaC analysis error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Analyze mapped source code (no upload needed) - Legacy endpoint
+router.post('/analyze', async (req, res) => {
+  try {
+    const { sourcePath } = req.body;
+    const sessionId = uuidv4();
+    const bedrockService = req.app.locals.bedrockService();
+    const awsService = req.app.locals.awsService();
+    const logger = req.app.locals.logger;
+
+    logger.info(`Starting analysis for session ${sessionId}`);
+
+    // Create analysis session
+    await db.run(
+      'INSERT INTO analysis_sessions (id, codebase_path, analysis_status) VALUES (?, ?, ?)',
+      [sessionId, sourcePath || '/var/app/mapped_source', 'processing']
+    );
+
+    // Step 1: Initialize
+    await updateProgress(sessionId, 1, 'Initializing analysis session...', 10);
+
+    // Analyze the mapped source code
+    const mappedSourcePath = sourcePath || '/var/app/mapped_source';
+    
+    // Check if mapped source exists
+    try {
+      await fs.access(mappedSourcePath);
+    } catch (error) {
+      throw new Error(`Source code path not found: ${mappedSourcePath}. Please ensure you've mapped your source code volume correctly.`);
+    }
+
+    // Step 2: Create temp folder and scan codebase
+    await updateProgress(sessionId, 2, 'Creating temporary analysis workspace...', 20);
+    const tempAnalysisPath = await createTempAnalysisFolder(sessionId, mappedSourcePath);
+    
+    await updateProgress(sessionId, 2, 'Scanning codebase structure and technologies...', 30);
+    const codebaseStructure = await analyzeCodebaseStructure(tempAnalysisPath);
+
+    // Step 3: AWS analysis
+    await updateProgress(sessionId, 3, 'Analyzing AWS resources (Cost, IAM, Compute)...', 50);
+    const [costAnalysis, iamAnalysis, computeAnalysis] = await Promise.all([
+      awsService.analyzeCosts(),
+      awsService.analyzeIAM(),
+      awsService.analyzeCompute()
+    ]);
+
+    // Step 4: Bedrock AI analysis
+    await updateProgress(sessionId, 4, 'Running AI analysis with AWS Bedrock...', 70);
+    const analysisResult = await bedrockService.analyzeCodebase(codebaseStructure, {
+      costAnalysis: costAnalysis.data,
+      iamAnalysis: iamAnalysis.data,
+      computeAnalysis: computeAnalysis.data
+    });
+
+    // Step 5: Generate report and save results
+    await updateProgress(sessionId, 5, 'Generating comprehensive report...', 90);
+    
+    // Update session with results
+    await db.run(
+      'UPDATE analysis_sessions SET analysis_status = ?, bedrock_analysis = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+      ['completed', JSON.stringify(analysisResult), sessionId]
+    );
+
+    // Store MCP analysis results
+    await Promise.all([
+      db.run('INSERT INTO mcp_analysis (session_id, analysis_type, results) VALUES (?, ?, ?)', 
+        [sessionId, 'cost', JSON.stringify(costAnalysis)]),
+      db.run('INSERT INTO mcp_analysis (session_id, analysis_type, results) VALUES (?, ?, ?)', 
+        [sessionId, 'iam', JSON.stringify(iamAnalysis)]),
+      db.run('INSERT INTO mcp_analysis (session_id, analysis_type, results) VALUES (?, ?, ?)', 
+        [sessionId, 'compute', JSON.stringify(computeAnalysis)])
+    ]);
+
+    // Step 6: Complete
+    await updateProgress(sessionId, 6, 'Analysis completed successfully!', 100);
 
     logger.info(`Analysis completed for session ${sessionId}`);
 
@@ -247,7 +355,64 @@ router.delete('/:sessionId/cleanup', async (req, res) => {
   }
 });
 
+// Add progress tracking endpoint
+router.get('/progress/:sessionId', async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    
+    const session = await db.get(
+      'SELECT analysis_status, progress_data FROM analysis_sessions WHERE id = ?',
+      [sessionId]
+    );
+
+    if (!session) {
+      return res.status(404).json({ error: 'Analysis session not found' });
+    }
+
+    const progressData = session.progress_data ? JSON.parse(session.progress_data) : null;
+
+    res.json({
+      success: true,
+      sessionId,
+      status: session.analysis_status,
+      progress: progressData
+    });
+
+  } catch (error) {
+    req.app.locals.logger.error('Get progress error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Helper functions
+async function updateProgress(sessionId, step, message, percentage = null) {
+  try {
+    const progressData = {
+      currentStep: step,
+      message: message,
+      percentage: percentage,
+      timestamp: new Date().toISOString(),
+      steps: [
+        { id: 'initializing', name: 'Initializing Analysis', completed: step >= 1 },
+        { id: 'scanning', name: 'Scanning Codebase', completed: step >= 2 },
+        { id: 'aws_analysis', name: 'Analyzing AWS Resources', completed: step >= 3 },
+        { id: 'bedrock_analysis', name: 'AI Analysis with Bedrock', completed: step >= 4 },
+        { id: 'generating_report', name: 'Generating Report', completed: step >= 5 },
+        { id: 'complete', name: 'Analysis Complete', completed: step >= 6 }
+      ]
+    };
+
+    await db.run(
+      'UPDATE analysis_sessions SET progress_data = ? WHERE id = ?',
+      [JSON.stringify(progressData), sessionId]
+    );
+    
+    console.log(`Progress Update [${sessionId}]: Step ${step} - ${message}`);
+  } catch (error) {
+    console.error('Failed to update progress:', error);
+  }
+}
+
 async function createTempAnalysisFolder(sessionId, sourcePath) {
   const tempDir = path.join('/var/app/temp', `analysis_${sessionId}`);
   
@@ -333,7 +498,8 @@ async function analyzeCodebaseStructure(analysisPath) {
     packageFiles: [],
     configFiles: [],
     dockerFiles: [],
-    infraFiles: []
+    infraFiles: [],
+    iacTemplates: [] // New: Store actual IaC template contents
   };
 
   async function scanDirectory(dirPath, relativePath = '') {
@@ -363,7 +529,7 @@ async function analyzeCodebaseStructure(analysisPath) {
             structure.totalSize += stats.size;
 
             // Analyze file types and technologies
-            analyzeFileType(item.name, ext, itemRelativePath, structure);
+            await analyzeFileType(item.name, ext, itemRelativePath, fullPath, structure);
 
           } catch (error) {
             // Skip files that can't be accessed
@@ -383,7 +549,7 @@ async function analyzeCodebaseStructure(analysisPath) {
   return structure;
 }
 
-function analyzeFileType(fileName, ext, filePath, structure) {
+async function analyzeFileType(fileName, ext, filePath, fullPath, structure) {
   const lowerFileName = fileName.toLowerCase();
   
   // Package files
@@ -401,9 +567,38 @@ function analyzeFileType(fileName, ext, filePath, structure) {
     structure.dockerFiles.push(filePath);
   }
 
-  // Infrastructure files
-  if (['.tf', '.tfvars'].includes(ext) || lowerFileName.includes('terraform') || lowerFileName.includes('cloudformation') || lowerFileName.includes('serverless')) {
+  // Infrastructure files - Enhanced for IaC analysis
+  const isIaCFile = (
+    ['.tf', '.tfvars', '.tfstate'].includes(ext) ||
+    ['.yaml', '.yml', '.json'].includes(ext) && (
+      lowerFileName.includes('cloudformation') ||
+      lowerFileName.includes('template') ||
+      lowerFileName.includes('stack') ||
+      lowerFileName.includes('cfn')
+    ) ||
+    lowerFileName.includes('terraform') ||
+    lowerFileName.includes('serverless') ||
+    lowerFileName.includes('sam-template') ||
+    lowerFileName.includes('cdk')
+  );
+
+  if (isIaCFile) {
     structure.infraFiles.push(filePath);
+    
+    // Read and store IaC template content for analysis
+    try {
+      const content = await fs.readFile(fullPath, 'utf8');
+      const iacTemplate = {
+        path: filePath,
+        fileName: fileName,
+        type: detectIaCType(fileName, ext, content),
+        content: content,
+        size: content.length
+      };
+      structure.iacTemplates.push(iacTemplate);
+    } catch (error) {
+      console.warn(`Could not read IaC file ${filePath}:`, error.message);
+    }
   }
 
   // Detect technologies
@@ -453,6 +648,49 @@ function analyzeFileType(fileName, ext, filePath, structure) {
   } else if (lowerFileName.includes('kubernetes') || lowerFileName.includes('k8s')) {
     structure.technologies.add('Kubernetes');
   }
+}
+
+// Helper function to detect Infrastructure as Code type
+function detectIaCType(fileName, ext, content) {
+  const lowerFileName = fileName.toLowerCase();
+  const lowerContent = content.toLowerCase();
+
+  // Terraform
+  if (['.tf', '.tfvars'].includes(ext) || lowerFileName.includes('terraform')) {
+    return 'terraform';
+  }
+
+  // CloudFormation
+  if (lowerContent.includes('awstemplateformatversion') || 
+      lowerContent.includes('cloudformation') ||
+      lowerFileName.includes('cloudformation') ||
+      lowerFileName.includes('cfn') ||
+      lowerFileName.includes('template')) {
+    return 'cloudformation';
+  }
+
+  // AWS SAM
+  if (lowerContent.includes('transform') && lowerContent.includes('sam-')) {
+    return 'sam';
+  }
+
+  // AWS CDK
+  if (lowerFileName.includes('cdk') || lowerContent.includes('aws-cdk')) {
+    return 'cdk';
+  }
+
+  // Serverless Framework
+  if (lowerFileName.includes('serverless') || lowerContent.includes('serverless')) {
+    return 'serverless';
+  }
+
+  // Kubernetes
+  if (lowerContent.includes('apiversion') && lowerContent.includes('kind')) {
+    return 'kubernetes';
+  }
+
+  // Default to generic IaC
+  return 'iac';
 }
 
 export { router as analysisRoutes }; 

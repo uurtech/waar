@@ -1,12 +1,12 @@
-import sqlite3 from 'sqlite3';
-import { promisify } from 'util';
+import Database from 'better-sqlite3';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import fs from 'fs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-class Database {
+class DatabaseWrapper {
   constructor() {
     this.db = null;
   }
@@ -14,68 +14,58 @@ class Database {
   async initialize() {
     const dbPath = path.join(__dirname, '../../data/well_architected.db');
     
-    return new Promise((resolve, reject) => {
-      this.db = new sqlite3.Database(dbPath, (err) => {
-        if (err) {
-          reject(err);
-        } else {
-          console.log('Connected to SQLite database');
-          resolve();
-        }
-      });
-    });
+    // Ensure data directory exists
+    fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+    
+    try {
+      this.db = new Database(dbPath);
+      console.log('Connected to SQLite database');
+    } catch (error) {
+      console.error('Error connecting to database:', error);
+      throw error;
+    }
   }
 
   async run(sql, params = []) {
-    return new Promise((resolve, reject) => {
-      this.db.run(sql, params, function(err) {
-        if (err) {
-          reject(err);
-        } else {
-          resolve({ id: this.lastID, changes: this.changes });
-        }
-      });
-    });
+    try {
+      const stmt = this.db.prepare(sql);
+      const result = stmt.run(params);
+      return { id: result.lastInsertRowid, changes: result.changes };
+    } catch (error) {
+      console.error('Database run error:', error);
+      throw error;
+    }
   }
 
   async get(sql, params = []) {
-    return new Promise((resolve, reject) => {
-      this.db.get(sql, params, (err, row) => {
-        if (err) {
-          reject(err);
-        } else {
-          resolve(row);
-        }
-      });
-    });
+    try {
+      const stmt = this.db.prepare(sql);
+      return stmt.get(params);
+    } catch (error) {
+      console.error('Database get error:', error);
+      throw error;
+    }
   }
 
   async all(sql, params = []) {
-    return new Promise((resolve, reject) => {
-      this.db.all(sql, params, (err, rows) => {
-        if (err) {
-          reject(err);
-        } else {
-          resolve(rows);
-        }
-      });
-    });
+    try {
+      const stmt = this.db.prepare(sql);
+      return stmt.all(params);
+    } catch (error) {
+      console.error('Database all error:', error);
+      throw error;
+    }
   }
 
   close() {
-    return new Promise((resolve) => {
-      this.db.close((err) => {
-        if (err) {
-          console.error('Error closing database:', err);
-        }
-        console.log('Database connection closed');
-        resolve();
-      });
-    });
+    if (this.db) {
+      this.db.close();
+      console.log('Database connection closed');
+    }
   }
 }
 
-const db = new Database();
+const db = new DatabaseWrapper();
 
 export const initializeDatabase = async () => {
   await db.initialize();
@@ -137,10 +127,22 @@ const createTables = async () => {
       analysis_status TEXT DEFAULT 'pending',
       bedrock_analysis TEXT,
       recommendations TEXT,
+      progress_data TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
+
+  // Check if progress_data column exists, if not add it
+  try {
+    await db.run(`SELECT progress_data FROM analysis_sessions LIMIT 1`);
+  } catch (error) {
+    if (error.code === 'SQLITE_ERROR' && error.message.includes('no such column: progress_data')) {
+      console.log('Adding progress_data column to analysis_sessions table...');
+      await db.run(`ALTER TABLE analysis_sessions ADD COLUMN progress_data TEXT`);
+      console.log('✅ progress_data column added successfully');
+    }
+  }
 
   // MCP analysis results
   await db.run(`

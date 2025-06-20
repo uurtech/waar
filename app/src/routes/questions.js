@@ -102,7 +102,7 @@ router.get('/:questionKey', async (req, res) => {
   }
 });
 
-// Submit answer to question
+// Submit answer to question with agent analysis
 router.post('/answer', async (req, res) => {
   try {
     const { questionKey, sessionId, answer, confidence, source = 'user' } = req.body;
@@ -113,17 +113,19 @@ router.post('/answer', async (req, res) => {
       });
     }
 
-    // Get question ID
-    const question = await db.get(
-      'SELECT id FROM questions WHERE question_key = ?',
-      [questionKey]
-    );
+    // Get question details
+    const question = await db.get(`
+      SELECT q.*, p.name as pillar_name
+      FROM questions q
+      JOIN pillars p ON q.pillar_id = p.id
+      WHERE q.question_key = ?
+    `, [questionKey]);
 
     if (!question) {
       return res.status(404).json({ error: 'Question not found' });
     }
 
-    // Insert or update answer
+    // Save the answer first
     await db.run(
       `INSERT INTO answers (question_id, session_id, answer_text, confidence_score, source, updated_at) 
        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
@@ -135,9 +137,49 @@ router.post('/answer', async (req, res) => {
       [question.id, sessionId, answer, confidence || 0.8, source]
     );
 
+    // Ask agent to analyze this specific answer
+    let agentAnalysis = null;
+    try {
+      const bedrockService = req.app.locals.bedrockService();
+      
+      const analysisPrompt = `
+Analyze this Well-Architected Framework answer:
+
+Pillar: ${question.pillar_name}
+Question: ${question.question_text}
+Category: ${question.category}
+User Answer: ${answer}
+
+Please provide:
+1. Assessment of the answer quality
+2. Specific recommendations for improvement
+3. Follow-up questions to dig deeper
+4. Risk areas to investigate
+5. Best practices suggestions
+
+Keep response concise but actionable.
+      `;
+
+      agentAnalysis = await bedrockService.analyzeText(analysisPrompt);
+      
+    } catch (agentError) {
+      req.app.locals.logger.warn('Agent analysis failed:', agentError.message);
+      agentAnalysis = {
+        error: 'Agent analysis unavailable',
+        message: 'Could not analyze answer with AI agent'
+      };
+    }
+
     res.json({
       success: true,
-      message: 'Answer saved successfully'
+      message: 'Answer saved and analyzed successfully',
+      agentAnalysis,
+      question: {
+        key: question.question_key,
+        text: question.question_text,
+        pillar: question.pillar_name,
+        category: question.category
+      }
     });
 
   } catch (error) {
@@ -175,6 +217,72 @@ router.get('/session/:sessionId/answers', async (req, res) => {
     });
   } catch (error) {
     req.app.locals.logger.error('Get session answers error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get next unanswered question for a session (one at a time)
+router.get('/session/:sessionId/next', async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    
+    // Get the next unanswered question with highest priority
+    const nextQuestion = await db.get(`
+      SELECT 
+        q.id,
+        q.question_key,
+        q.question_text,
+        q.category,
+        p.name as pillar_name,
+        p.description as pillar_description,
+        q.priority
+      FROM questions q
+      JOIN pillars p ON q.pillar_id = p.id
+      LEFT JOIN answers a ON q.id = a.question_id AND a.session_id = ?
+      WHERE a.id IS NULL
+      ORDER BY q.priority DESC, p.name, q.category
+      LIMIT 1
+    `, [sessionId]);
+    
+    if (!nextQuestion) {
+      // Get completion stats
+      const stats = await db.get(`
+        SELECT 
+          COUNT(DISTINCT q.id) as total_questions,
+          COUNT(DISTINCT a.question_id) as answered_questions
+        FROM questions q
+        LEFT JOIN answers a ON q.id = a.question_id AND a.session_id = ?
+      `, [sessionId]);
+      
+      return res.json({
+        success: true,
+        completed: true,
+        message: 'All questions have been answered!',
+        stats
+      });
+    }
+    
+    // Get progress info
+    const progress = await db.get(`
+      SELECT 
+        COUNT(DISTINCT q.id) as total_questions,
+        COUNT(DISTINCT a.question_id) as answered_questions
+      FROM questions q
+      LEFT JOIN answers a ON q.id = a.question_id AND a.session_id = ?
+    `, [sessionId]);
+    
+    res.json({
+      success: true,
+      question: nextQuestion,
+      progress: {
+        current: progress.answered_questions + 1,
+        total: progress.total_questions,
+        percentage: Math.round(((progress.answered_questions + 1) / progress.total_questions) * 100)
+      }
+    });
+    
+  } catch (error) {
+    req.app.locals.logger.error('Get next question error:', error);
     res.status(500).json({ error: error.message });
   }
 });

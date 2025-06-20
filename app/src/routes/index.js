@@ -3,6 +3,7 @@ import { analysisRoutes } from './analysis.js';
 import { questionsRoutes } from './questions.js';
 import { mcpRoutes } from './mcp.js';
 import { healthRoutes } from './health.js';
+import { wellArchitectedReviewRoutes } from './well-architected-review.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -15,6 +16,7 @@ export const setupRoutes = (app) => {
   app.use('/api/questions', questionsRoutes);
   app.use('/api/mcp', mcpRoutes);
   app.use('/api/health', healthRoutes);
+  app.use('/api/review', wellArchitectedReviewRoutes);
 
   // Serve main application
   app.get('/', (req, res) => {
@@ -27,8 +29,17 @@ export const setupRoutes = (app) => {
       name: 'Well-Architected Reviewer API',
       version: '1.0.0',
       endpoints: {
+        review: {
+          'POST /api/review/start': 'Start a new Well-Architected Review (AWS API-based)',
+          'POST /api/review/:sessionId/answer': 'Submit answer to a Well-Architected question',
+          'GET /api/review/:sessionId/status': 'Get review progress and next question',
+          'GET /api/review/:sessionId/report': 'Get final Well-Architected report',
+          'GET /api/review/aws-analysis': 'Get comprehensive AWS analysis data'
+        },
         analysis: {
-          'POST /api/analysis/upload': 'Upload codebase for analysis',
+          'POST /api/analysis/analyze-iac': 'Analyze Infrastructure as Code templates (deprecated)',
+          'POST /api/analysis/analyze': 'Analyze general codebase (deprecated)',
+          'POST /api/analysis/upload': 'Upload codebase for analysis (deprecated)',
           'GET /api/analysis/:sessionId': 'Get analysis results',
           'POST /api/analysis/:sessionId/answer': 'Submit answer to question'
         },
